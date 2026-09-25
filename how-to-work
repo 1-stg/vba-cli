@@ -1,0 +1,25 @@
+you need:
+ node.js 18+
+ microsoft excel
+ windows
+ vs code
+
+start dev:
+ Unzip the archive in any convenient location (I placed it in the root of the system drive).
+ Open PowerShell or cmd and navigate to the project directory (C:/vba-cli)
+
+ Run the following commands:
+  npm install
+  npm link
+
+ After that, the vba command will be available globally.
+  To check that everything worked, write “vba help” or “vba -v” in Powershell.
+   It should display a list of commands or the version.
+
+ Then go to you VBA projects dir and execute the command:
+  "vba init <name>" ("vba init testProject")
+
+ your vs code will be redirect you to new window in new project
+
+ Then execute in Powershell "vba dev"
+  Changes to each VBA file will be automatically saved to the Excel file in the project root, like Live Server for JS.
