@@ -1,0 +1,19 @@
+{
+  "name": "vba-cli",
+  "version": "1.0.8",
+  "description": "CLI for developing Microsoft Excel VBA projects from VS Code with Excel COM synchronization",
+  "main": "index.js",
+  "bin": {
+    "vba": "index.js"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "test": "node index.js help"
+  },
+  "dependencies": {
+    "chokidar": "^4.0.3"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
