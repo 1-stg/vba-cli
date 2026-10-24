@@ -1,6 +1,6 @@
 {
   "name": "vba-cli",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "CLI for developing Microsoft Excel VBA projects from VS Code with Excel COM synchronization",
   "main": "index.js",
   "bin": {

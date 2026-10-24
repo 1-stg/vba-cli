@@ -499,17 +499,29 @@ function Get-ComponentByName($vbProject, $name) {
 }
 
 function Remove-ExistingComponent($vbProject, $name) {
-    $existing = Get-ComponentByName $vbProject $name
-
-    if ($null -eq $existing) {
-        return
+    # COM collections can return stale component proxies after Remove().
+    # Remove by current collection index, then verify the name is truly gone.
+    for ($attempt = 0; $attempt -lt 3; $attempt++) {
+        $found = $false
+        for ($i = $vbProject.VBComponents.Count; $i -ge 1; $i--) {
+            $component = $null
+            try { $component = $vbProject.VBComponents.Item($i) } catch { continue }
+            if ([string]::Equals([string]$component.Name, $name, [StringComparison]::OrdinalIgnoreCase)) {
+                if ($component.Type -eq 100) {
+                    throw "Cannot replace document module '$name'."
+                }
+                $vbProject.VBComponents.Remove($component)
+                $found = $true
+                break
+            }
+        }
+        if (-not $found) { return }
+        Start-Sleep -Milliseconds 150
     }
-
-    if ($existing.Type -eq 100) {
-        throw "Cannot replace document module '$name'."
+    $remaining = Get-ComponentByName $vbProject $name
+    if ($null -ne $remaining) {
+        throw "Could not remove existing VBA component '$name'. It may still be open or the workbook/project is locked."
     }
-
-    $vbProject.VBComponents.Remove($existing)
 }
 
 function Get-Utf8Text($filePath) {
@@ -597,8 +609,14 @@ try {
 
     try {
         if ($extension -eq ".frm") {
-            $tempImport = Join-Path $env:TEMP ("vba-cli-" + [Guid]::NewGuid().ToString() + ".frm")
+            $tempBase = Join-Path $env:TEMP ("vba-cli-" + [Guid]::NewGuid().ToString())
+            $tempImport = $tempBase + ".frm"
+            $sourceFrx = [IO.Path]::ChangeExtension($SourcePath, ".frx")
+            $tempFrx = $tempBase + ".frx"
             Convert-SourceToExcelAnsi $SourcePath $tempImport
+            if (Test-Path -LiteralPath $sourceFrx) {
+                Copy-Item -LiteralPath $sourceFrx -Destination $tempFrx -Force
+            }
 
             Remove-ExistingComponent $vbProject $ComponentName
 
@@ -644,6 +662,8 @@ try {
     finally {
         if ($null -ne $tempImport) {
             Remove-Item -LiteralPath $tempImport -Force -ErrorAction SilentlyContinue
+            $tempFrxPath = [IO.Path]::ChangeExtension($tempImport, ".frx")
+            Remove-Item -LiteralPath $tempFrxPath -Force -ErrorAction SilentlyContinue
         }
     }
 }
@@ -689,10 +709,26 @@ function Get-ComponentByName($vbProject, $name) {
 }
 
 function Remove-ExistingComponent($vbProject, $name) {
-    $existing = Get-ComponentByName $vbProject $name
-    if ($null -eq $existing) { return }
-    if ($existing.Type -eq 100) { throw "Cannot replace document module '$name'." }
-    $vbProject.VBComponents.Remove($existing)
+    # Remove by live collection index and verify the component is actually gone.
+    for ($attempt = 0; $attempt -lt 3; $attempt++) {
+        $found = $false
+        for ($i = $vbProject.VBComponents.Count; $i -ge 1; $i--) {
+            $component = $null
+            try { $component = $vbProject.VBComponents.Item($i) } catch { continue }
+            if ([string]::Equals([string]$component.Name, $name, [StringComparison]::OrdinalIgnoreCase)) {
+                if ($component.Type -eq 100) { throw "Cannot replace document module '$name'." }
+                $vbProject.VBComponents.Remove($component)
+                $found = $true
+                break
+            }
+        }
+        if (-not $found) { return }
+        Start-Sleep -Milliseconds 150
+    }
+    $remaining = Get-ComponentByName $vbProject $name
+    if ($null -ne $remaining) {
+        throw "Could not remove existing VBA component '$name'. It may still be open or the workbook/project is locked."
+    }
 }
 
 function Get-Utf8Text($filePath) {
@@ -754,8 +790,12 @@ try {
         $tempImport = $null
         try {
             if ($extension -eq ".frm") {
-                $tempImport = Join-Path $env:TEMP ("vba-cli-" + [Guid]::NewGuid().ToString() + ".frm")
+                $tempBase = Join-Path $env:TEMP ("vba-cli-" + [Guid]::NewGuid().ToString())
+                $tempImport = $tempBase + ".frm"
+                $sourceFrx = [IO.Path]::ChangeExtension($sourcePath, ".frx")
+                $tempFrx = $tempBase + ".frx"
                 Convert-SourceToExcelAnsi $sourcePath $tempImport
+                if (Test-Path -LiteralPath $sourceFrx) { Copy-Item -LiteralPath $sourceFrx -Destination $tempFrx -Force }
                 Remove-ExistingComponent $vbProject $componentName
                 $imported = $vbProject.VBComponents.Import($tempImport)
                 if ($null -eq $imported) { throw "VBComponents.Import returned NULL for '$componentName'." }
@@ -770,7 +810,11 @@ try {
             }
             Write-Output ("OK|" + $componentName + "|" + $expectedType)
         } finally {
-            if ($null -ne $tempImport) { Remove-Item -LiteralPath $tempImport -Force -ErrorAction SilentlyContinue }
+            if ($null -ne $tempImport) {
+                Remove-Item -LiteralPath $tempImport -Force -ErrorAction SilentlyContinue
+                $tempFrxPath = [IO.Path]::ChangeExtension($tempImport, ".frx")
+                Remove-Item -LiteralPath $tempFrxPath -Force -ErrorAction SilentlyContinue
+            }
         }
     }
     $workbook.Save()
@@ -779,6 +823,192 @@ try {
     exit 1
 }
 `;
+}
+
+
+function buildPowerShellExportScript() {
+    return String.raw`
+param([string]$WorkbookPath, [string]$SourceDir)
+
+function Get-ExcelApplication {
+    try { return [Runtime.InteropServices.Marshal]::GetActiveObject("Excel.Application") }
+    catch {
+        $excel = New-Object -ComObject Excel.Application
+        $excel.Visible = $true
+        return $excel
+    }
+}
+function Get-WorkbookByPath($excel, $targetPath) {
+    $targetFull = [IO.Path]::GetFullPath($targetPath)
+    foreach ($wb in $excel.Workbooks) {
+        try {
+            if ([string]::Equals([IO.Path]::GetFullPath($wb.FullName), $targetFull, [StringComparison]::OrdinalIgnoreCase)) { return $wb }
+        } catch {}
+    }
+    return $null
+}
+try {
+    if (-not (Test-Path -LiteralPath $WorkbookPath)) { throw "Workbook does not exist: $WorkbookPath" }
+    if (-not (Test-Path -LiteralPath $SourceDir)) { [void](New-Item -ItemType Directory -Path $SourceDir -Force) }
+    $excel = Get-ExcelApplication
+    $excel.Visible = $true
+    $null = $excel.VBE
+    $workbook = Get-WorkbookByPath $excel $WorkbookPath
+    if ($null -eq $workbook) { $workbook = $excel.Workbooks.Open($WorkbookPath) }
+    $vbProject = $workbook.VBProject
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    $exported = 0
+    foreach ($component in $vbProject.VBComponents) {
+        $type = [int]$component.Type
+        if ($type -eq 100) { continue } # Excel document modules are not portable source files.
+        switch ($type) {
+            1 { $folder = "Modules"; $extension = ".bas" }
+            2 { $folder = "Classes"; $extension = ".cls" }
+            3 { $folder = "Forms"; $extension = ".frm" }
+            default { continue }
+        }
+        $destinationDir = Join-Path $SourceDir $folder
+        [void](New-Item -ItemType Directory -Path $destinationDir -Force)
+        $destination = Join-Path $destinationDir ($component.Name + $extension)
+        $temp = Join-Path $env:TEMP ("vba-cli-export-" + [Guid]::NewGuid().ToString() + $extension)
+        try {
+            $component.Export($temp)
+            $text = [IO.File]::ReadAllText($temp, [Text.Encoding]::Default)
+            [IO.File]::WriteAllText($destination, $text, $utf8)
+            if ($type -eq 3) {
+                $frxTemp = [IO.Path]::ChangeExtension($temp, ".frx")
+                $frxDestination = [IO.Path]::ChangeExtension($destination, ".frx")
+                if (Test-Path -LiteralPath $frxTemp) { Copy-Item -LiteralPath $frxTemp -Destination $frxDestination -Force }
+            }
+            $exported++
+        } finally {
+            Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath ([IO.Path]::ChangeExtension($temp, ".frx")) -Force -ErrorAction SilentlyContinue
+        }
+    }
+    Write-Output ("EXPORTED|" + $exported)
+} catch {
+    [Console]::Error.WriteLine(("VBA_EXPORT_ERROR: " + $_.Exception.Message))
+    exit 1
+}
+`;
+}
+
+async function exportVBA(options = {}) {
+    console.log("\nVBA EXPORT\n");
+    const paths = getProjectPaths(options.cwd || process.cwd());
+    if (!fs.existsSync(paths.workbookPath)) throw new Error(`Excel-книга не найдена: ${paths.workbookPath}`);
+    createDir(paths.sourceDir);
+    const output = runPowerShell(buildPowerShellExportScript(), [paths.workbookPath, paths.sourceDir]);
+    const match = output.match(/EXPORTED\|(\d+)/);
+    success(`Экспорт завершён. Компонентов: ${match ? match[1] : "?"}.`);
+}
+
+function buildPowerShellRemoveScript() {
+    return String.raw`
+param([string]$WorkbookPath, [string]$ComponentName)
+try {
+    if (-not (Test-Path -LiteralPath $WorkbookPath)) { throw "Workbook does not exist: $WorkbookPath" }
+    try { $excel = [Runtime.InteropServices.Marshal]::GetActiveObject("Excel.Application") }
+    catch { $excel = New-Object -ComObject Excel.Application; $excel.Visible = $true }
+    $target = [IO.Path]::GetFullPath($WorkbookPath)
+    $workbook = $null
+    foreach ($wb in $excel.Workbooks) {
+        try { if ([string]::Equals([IO.Path]::GetFullPath($wb.FullName), $target, [StringComparison]::OrdinalIgnoreCase)) { $workbook = $wb; break } } catch {}
+    }
+    if ($null -eq $workbook) { $workbook = $excel.Workbooks.Open($WorkbookPath) }
+    $vbProject = $workbook.VBProject
+    $component = $null
+    foreach ($item in $vbProject.VBComponents) {
+        if ([string]::Equals($item.Name, $ComponentName, [StringComparison]::OrdinalIgnoreCase)) { $component = $item; break }
+    }
+    if ($null -eq $component) { Write-Output ("NOT_FOUND|" + $ComponentName); exit 0 }
+    if ([int]$component.Type -eq 100) { throw "Refusing to remove Excel document module '$ComponentName'." }
+    $vbProject.VBComponents.Remove($component)
+    $workbook.Save()
+    Write-Output ("REMOVED|" + $ComponentName)
+} catch {
+    [Console]::Error.WriteLine(("VBA_REMOVE_ERROR: " + $_.Exception.Message))
+    exit 1
+}
+`;
+}
+
+async function removeComponent(filePath, options = {}) {
+    const paths = getProjectPaths(options.cwd || process.cwd());
+    const componentName = componentNameFromFile(filePath);
+    const output = runPowerShell(buildPowerShellRemoveScript(), [paths.workbookPath, componentName]);
+    if (output.includes("NOT_FOUND|")) {
+        info(`Компонент ${componentName} уже отсутствует в Excel.`);
+    } else {
+        success(`Компонент удалён из Excel: ${componentName}`);
+    }
+}
+
+async function createComponent(kind, requestedName) {
+    const paths = getProjectPaths();
+    const definitions = {
+        module: { extension: ".bas", folder: "Modules", label: "модуль" },
+        class: { extension: ".cls", folder: "Classes", label: "класс" },
+        form: { extension: ".frm", folder: "Forms", label: "форму" }
+    };
+    const definition = definitions[kind];
+    if (!definition) throw new Error("Тип компонента должен быть module, class или form.");
+    let name = requestedName;
+    if (!name) name = await ask(`Имя ${definition.label} (без расширения): `);
+    name = String(name || "").trim();
+    if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(name)) {
+        throw new Error("Имя должно начинаться с латинской буквы и содержать только латинские буквы, цифры и '_'.");
+    }
+    const dir = path.join(paths.sourceDir, definition.folder);
+    const filePath = path.join(dir, name + definition.extension);
+    if (fs.existsSync(filePath)) throw new Error(`Файл уже существует: ${filePath}`);
+    createDir(dir);
+
+    if (kind === "form") {
+        const script = String.raw`
+param([string]$WorkbookPath, [string]$ComponentName, [string]$Destination)
+try {
+    try { $excel = [Runtime.InteropServices.Marshal]::GetActiveObject("Excel.Application") }
+    catch { $excel = New-Object -ComObject Excel.Application; $excel.Visible = $true }
+    $target = [IO.Path]::GetFullPath($WorkbookPath)
+    $workbook = $null
+    foreach ($wb in $excel.Workbooks) {
+        try { if ([string]::Equals([IO.Path]::GetFullPath($wb.FullName), $target, [StringComparison]::OrdinalIgnoreCase)) { $workbook = $wb; break } } catch {}
+    }
+    if ($null -eq $workbook) { $workbook = $excel.Workbooks.Open($WorkbookPath) }
+    foreach ($item in $workbook.VBProject.VBComponents) {
+        if ([string]::Equals($item.Name, $ComponentName, [StringComparison]::OrdinalIgnoreCase)) { throw "Component already exists in Excel: $ComponentName" }
+    }
+    $component = $workbook.VBProject.VBComponents.Add(3)
+    $component.Name = $ComponentName
+    $component.Export($Destination)
+    $workbook.Save()
+    Write-Output "OK"
+} catch {
+    [Console]::Error.WriteLine(("VBA_CREATE_ERROR: " + $_.Exception.Message))
+    exit 1
+}
+`;
+        try {
+            runPowerShell(script, [paths.workbookPath, name, filePath]);
+        } catch (err) {
+            if (fs.existsSync(filePath)) fs.rmSync(filePath, { force: true });
+            throw err;
+        }
+    } else {
+        const content = kind === "module"
+            ? `Attribute VB_Name = "${name}"\nOption Explicit\n\n`
+            : `VERSION 1.0 CLASS\nBEGIN\n    MultiUse = -1\nEND\n\nAttribute VB_Name = "${name}"\nAttribute VB_GlobalNameSpace = False\nAttribute VB_Creatable = False\nAttribute VB_PredeclaredId = False\nAttribute VB_Exposed = False\n\nOption Explicit\n\n`;
+        writeUtf8(filePath, content);
+        try {
+            await importFile(filePath, { cwd: paths.root });
+        } catch (err) {
+            fs.rmSync(filePath, { force: true });
+            throw err;
+        }
+    }
+    success(`Создан ${definition.label}: ${path.relative(paths.root, filePath)}`);
 }
 
 async function importFile(filePath, options = {}) {
@@ -1101,6 +1331,9 @@ VBA CLI v${CLI_VERSION}
   vba dev               Запустить watcher
   vba import            Импортировать src -> Excel
   vba export            Экспортировать Excel -> src
+  vba create:module [name] Создать стандартный модуль
+  vba create:class [name]  Создать класс
+  vba create:form [name]   Создать UserForm
   vba build             Выполнить сборку
   vba clean             Удалить build/
   vba help              Показать справку
@@ -1111,6 +1344,9 @@ VBA CLI v${CLI_VERSION}
   vba dev
   vba import
   vba export
+  vba create:module modExample
+  vba create:class clsExample
+  vba create:form frmExample
   vba build
   vba clean
 
@@ -1156,6 +1392,18 @@ async function main() {
 
             case "export":
                 await exportVBA();
+                break;
+
+            case "create:module":
+                await createComponent("module", args[0]);
+                break;
+
+            case "create:class":
+                await createComponent("class", args[0]);
+                break;
+
+            case "create:form":
+                await createComponent("form", args[0]);
                 break;
 
             case "build":

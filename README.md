@@ -80,3 +80,24 @@ src/Forms/UserForm1.frm -> UserForm
 - Разрешён программный доступ к VBA Project Object Model в Excel
 
 > Если Excel блокирует доступ к `VBProject`, включите в Excel: Trust Center → Macro Settings → Trust access to the VBA project object model.
+
+
+## Создание компонентов
+
+Из корня проекта можно создавать VBA-компоненты командами:
+
+```powershell
+vba create:module modExample
+vba create:class clsExample
+vba create:form frmExample
+```
+
+Имя можно не указывать — CLI запросит его интерактивно. Исходники создаются в
+`src/Modules`, `src/Classes` и `src/Forms` соответственно. Для создания UserForm
+требуется установленный Excel и разрешённый доступ к VBA Project Object Model.
+
+## Экспорт
+
+`vba export` экспортирует стандартные модули, классы и формы из книги Excel в
+соответствующие каталоги `src`. Код сохраняется в UTF-8. Модули листов и книги
+Excel (document modules) автоматически пропускаются: они привязаны к самой книге.
