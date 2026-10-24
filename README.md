@@ -1,8 +1,8 @@
-# VBA CLI 1.0.8
+# VBA CLI 1.0.9
 
 CLI для разработки Excel VBA из VS Code с синхронизацией через Excel COM.
 
-## Исправления в 1.0.8
+## Исправления в 1.0.9
 
 - `vba import` импортирует `.bas` и `.cls` через `VBComponents.Add()` с явным типом: `.bas` → Standard Module, `.cls` → Class Module. Это исключает ситуацию, когда `Example.cls` попадает в Modules.
 - Убран batch-импорт через `ConvertFrom-Json`: каждый файл передаётся в PowerShell отдельной строкой. Это устраняет ошибку Windows PowerShell вида `System.Object[]`.
@@ -80,7 +80,6 @@ src/Forms/UserForm1.frm -> UserForm
 - Разрешён программный доступ к VBA Project Object Model в Excel
 
 > Если Excel блокирует доступ к `VBProject`, включите в Excel: Trust Center → Macro Settings → Trust access to the VBA project object model.
-
 
 ## Создание компонентов
 
